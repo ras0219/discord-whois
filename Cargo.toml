@@ -1,0 +1,17 @@
+[package]
+name = "discord-whois"
+version = "0.1.0"
+authors = ["Robert Schumacher <ras0219@outlook.com>"]
+edition = "2018"
+
+[dependencies]
+reqwest = { version = "0.10", features = ["json"] }
+tokio = { version = "0.2.20", features = ["rt-threaded", "macros", "time"] }
+tungstenite = "*"
+async-tungstenite = { version = "0.4.2", features = ["async-native-tls"] }
+httparse = "*"
+futures-util = "*"
+serde = { version = "1.0", features= ["derive"] }
+serde_json = "1.0"
+async-std = "*"
+async-native-tls = "*"
