@@ -76,26 +76,9 @@ impl<'a> DiscordAgent<'a> {
                         .create_msg(&msg.channel_id, &msg.content[5..])
                         .await;
                 } else if msg.content.starts_with("++") {
-                    let counter = self
-                        .state
-                        .userlist
-                        .entry(msg.content[2..].to_string())
-                        .or_insert(0);
-                    *counter += 1;
-                    self.state.dirty = true;
-                    self.dclient
-                        .create_reaction(&msg.channel_id, &msg.id, "%f0%9f%8d%80")
-                        .await;
+                    self.add_karma(msg, msg.content[2..].to_string()).await;
                 } else if msg.content.ends_with("++") {
-                    let counter = self
-                        .state
-                        .userlist
-                        .entry(msg.content[..(msg.content.len() - 2)].to_string())
-                        .or_insert(0);
-                    *counter += 1;
-                    self.state.dirty = true;
-                    self.dclient
-                        .create_reaction(&msg.channel_id, &msg.id, "%f0%9f%8d%80")
+                    self.add_karma(msg, msg.content[..(msg.content.len() - 2)].to_string())
                         .await;
                 } else if msg.content.starts_with("%karma ") {
                     let value = self
@@ -111,6 +94,15 @@ impl<'a> DiscordAgent<'a> {
             _ => {}
         }
         self.state.to_file_if_dirty("data.json");
+    }
+
+    async fn add_karma(&mut self, msg: &Message, user: String) {
+        let counter = self.state.userlist.entry(user).or_insert(0);
+        *counter += 1;
+        self.state.dirty = true;
+        self.dclient
+            .create_reaction(&msg.channel_id, &msg.id, "%f0%9f%8d%80")
+            .await;
     }
 
     async fn on_all_guilds(&mut self) {
