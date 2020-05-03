@@ -1,197 +1,138 @@
 #![allow(unused_mut)]
-use async_native_tls::TlsStream;
-use async_std::net::TcpStream;
-use futures_util::sink::SinkExt;
-use httparse::Header;
-use serde_json::json;
-use std::collections::HashMap;
-use tokio::stream::StreamExt;
-use tungstenite::Message;
+use serde::{Deserialize, Serialize};
 
+mod discordclient;
 mod discordmessage;
 
+use crate::discordclient::*;
 use crate::discordmessage::*;
 
-struct DiscordClient {
-    raw_tok: String,
-    wss: async_tungstenite::WebSocketStream<
-        async_tungstenite::stream::Stream<TcpStream, TlsStream<TcpStream>>,
-    >,
-    session_id: String,
-    client: reqwest::Client,
-    auth_header: String,
+#[derive(Deserialize, Serialize, Debug)]
+struct DiscordAgentState {
+    #[serde(skip)]
+    dirty: bool,
+    userlist: std::collections::HashMap<String, i32>,
 }
 
-impl DiscordClient {
-    async fn new(tok: String) -> DiscordClient {
-        let client = reqwest::Client::builder()
-            .user_agent("DiscordBot (https://github.com/ras0219, 0)")
-            .build()
-            .unwrap();
-
-        let auth_header = format!("Bot {}", tok);
-
-        let mut headers = [Header {
-            name: "Authorization",
-            value: auth_header.as_bytes(),
-        }];
-        let mut req = httparse::Request::new(&mut headers);
-        req.path = Some(&"wss://gateway.discord.gg/?v=6&encoding=json");
-        req.method = Some("GET");
-        req.version = Some(b'1');
-
-        let (wss, _) = async_tungstenite::async_std::connect_async(req)
-            .await
-            .unwrap();
-
-        let mut dclient = DiscordClient {
-            raw_tok: tok,
-            wss,
-            session_id: "".to_string(),
-            client,
-            auth_header,
-        };
-        dclient
+impl DiscordAgentState {
+    fn new() -> Self {
+        DiscordAgentState {
+            dirty: false,
+            userlist: std::collections::HashMap::new(),
+        }
     }
-    async fn create_channel(&mut self, id: &str) -> Channel {
-        let mut p = HashMap::new();
-        p.insert("recipient_id", id);
-        let msg = &self
-            .client
-            .post("https://discordapp.com/api/v6/users/@me/channels")
-            .json(&p)
-            .header("Authorization", &self.auth_header)
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        println!("create_channel() -> {}", msg);
-        serde_json::from_str::<Channel>(msg).unwrap()
+    fn from_file(filename: &str) -> Self {
+        let file = std::fs::File::open(filename);
+        match file {
+            Ok(f) => serde_json::de::from_reader(std::io::BufReader::new(f)).unwrap(),
+            _ => Self::new(),
+        }
     }
-    async fn create_msg(&mut self, chan_id: &str, content: &str) {
-        // let payload = json!({
-        //   "content": "Hello, World!",
-        //   "tts": false,
-        //   "embed": {
-        //     "title": "Hello, Embed!",
-        //     "description": "This is an embedded message."
-        //   }
-        // })
-        // .to_string();
-        for _ in 1..3 {
-            let payload = json!({ "content": content }).to_string();
-            let res = &self
-                .client
-                .post(&format!(
-                    "https://discordapp.com/api/v6/channels/{}/messages",
-                    chan_id
-                ))
-                .body(payload)
-                .header("Authorization", &self.auth_header)
-                .header("Content-Type", "application/json")
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap();
-            println!("create_msg: {}", res);
-            match serde_json::from_str::<CreateMessageResponse>(res).unwrap() {
-                CreateMessageResponse::Success { .. } => {
-                    break;
+    fn to_file_if_dirty(&mut self, filename: &str) {
+        if self.dirty {
+            self.dirty = false;
+            self.to_file(filename);
+        }
+    }
+    fn to_file(&self, filename: &str) {
+        let file = std::fs::File::create(filename).unwrap();
+        serde_json::ser::to_writer_pretty(std::io::BufWriter::new(file), self).unwrap();
+    }
+}
+
+struct DiscordAgent<'a> {
+    dclient: &'a mut DiscordClient,
+    promised_guilds: usize,
+    guilds: Vec<Guild>,
+    exit: bool,
+    state: DiscordAgentState,
+}
+
+impl<'a> DiscordAgent<'a> {
+    fn new(dclient: &'a mut DiscordClient) -> Self {
+        Self {
+            promised_guilds: 0,
+            guilds: vec![],
+            exit: false,
+            dclient,
+            state: DiscordAgentState::new(),
+        }
+    }
+
+    async fn on_msg(&mut self, msg: &DiscordMessage) {
+        match msg {
+            DiscordMessage::GuildCreate { d, .. } => {
+                self.guilds.push(d.clone());
+                if self.guilds.len() == self.promised_guilds {
+                    self.on_all_guilds().await;
                 }
-                CreateMessageResponse::RateLimit { retry_after, .. } => {
-                    tokio::time::delay_for(std::time::Duration::from_millis(retry_after.into()))
+            }
+            DiscordMessage::MessageCreate { d: msg, .. } => {
+                if msg.author.id == self.dclient.my_id {
+                    return;
+                }
+                if msg.content.starts_with("%say ") {
+                    self.dclient
+                        .create_msg(&msg.channel_id, &msg.content[5..])
+                        .await;
+                } else if msg.content.starts_with("++") {
+                    let counter = self
+                        .state
+                        .userlist
+                        .entry(msg.content[2..].to_string())
+                        .or_insert(0);
+                    *counter += 1;
+                    self.state.dirty = true;
+                    self.dclient
+                        .create_reaction(&msg.channel_id, &msg.id, "%f0%9f%8d%80")
+                        .await;
+                } else if msg.content.ends_with("++") {
+                    let counter = self
+                        .state
+                        .userlist
+                        .entry(msg.content[..(msg.content.len() - 2)].to_string())
+                        .or_insert(0);
+                    *counter += 1;
+                    self.state.dirty = true;
+                    self.dclient
+                        .create_reaction(&msg.channel_id, &msg.id, "%f0%9f%8d%80")
+                        .await;
+                } else if msg.content.starts_with("%karma ") {
+                    let value = self
+                        .state
+                        .userlist
+                        .get(&msg.content[7..].to_string())
+                        .unwrap_or(&0);
+                    self.dclient
+                        .create_msg(&msg.channel_id, &format!("Karma: {}", value))
                         .await;
                 }
             }
+            _ => {}
         }
+        self.state.to_file_if_dirty("data.json");
     }
-    async fn next_msg(&mut self) -> DiscordMessage {
-        let msg = self.wss.next().await.unwrap().unwrap();
-        let dismsg = serde_json::from_str::<DiscordMessage>(&msg.to_string());
-        println!("DisMsg: {:?}", dismsg);
-        if dismsg.is_err() {
-            println!("Msg: {}", msg);
-        }
-        dismsg.unwrap()
-    }
-    async fn get_hello(&mut self) {
-        self.next_msg().await;
-    }
-    async fn resume(&mut self, session_id: String) {
-        let payload = json!({
-            "op": 6,
-            "d": {
-                "token": self.raw_tok,
-                "session_id": session_id,
-                "seq": 1337
-            }
-        })
-        .to_string();
-        self.wss.send(Message::text(payload)).await.unwrap();
-        loop {
-            let msg = self.next_msg().await;
-            match msg {
-                DiscordMessage::Resumed { d, .. } => {
-                    self.session_id = d.session_id;
+
+    async fn on_all_guilds(&mut self) {
+        for g in &self.guilds {
+            for c in g.channels.as_ref().unwrap() {
+                if c.name.as_ref().unwrap() == "bot-playground" {
+                    for x in &c.last_message_id {
+                        let lastmsg = self.dclient.get_channel_message(&c.id, x).await;
+                        println!("Last Message: {:?}", lastmsg);
+                        self.dclient.create_reaction(&c.id, x, "%f0%9f%94%a5").await;
+                    }
                 }
-
-                DiscordMessage::InvalidSession {} => {
-                    return self.identify().await;
-                }
-
-                _ => {}
             }
         }
     }
-    async fn identify(&mut self) {
-        let payload = json!(
-        {
-            "op": 2,
-            "d": {
-              "token": self.raw_tok,
-              "properties": {
-                "$os": "linux",
-                "$browser": "my_library",
-                "$device": "my_library"
-              }
-            }
-          })
-        .to_string();
 
-        self.wss.send(Message::text(payload)).await.unwrap();
-        let msg = self.next_msg().await;
-        match msg {
-            DiscordMessage::Ready { d, .. } => {
-                self.session_id = d.session_id;
-            }
-            _ => panic!(),
+    async fn main_loop(&mut self) {
+        while !self.exit {
+            let msg = self.dclient.next_msg().await;
+            self.on_msg(&msg).await;
         }
     }
-    async fn get_channel_message(&mut self, chan: &str, msg: &str) -> discordmessage::Message {
-        let msg = &self
-            .client
-            .get(&format!(
-                "https://discordapp.com/api/v6/channels/{}/messages/{}",
-                chan, msg
-            ))
-            .header("Authorization", &self.auth_header)
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        println!("get_chan_msg() -> {}", msg);
-        serde_json::from_str::<discordmessage::Message>(msg).unwrap()
-    }
-}
-
-struct DiscordAgent {
-    guilds: Vec<Guild>,
 }
 
 #[tokio::main]
@@ -200,47 +141,16 @@ async fn main() {
         .expect("Expected bot token in DISCORD_TOKEN environment variable");
     let mut dclient = DiscordClient::new(raw_tok).await;
     dclient.get_hello().await;
-    let _session_id = match std::env::var("DISCORD_SESSION") {
-        Ok(val) => dclient.resume(val).await,
-        Err(_) => dclient.identify().await,
-    };
+    // let ready = match std::env::var("DISCORD_SESSION") {
+    //     Ok(val) => dclient.resume(val).await,
+    //     Err(_) => dclient.identify().await,
+    // };
+    let ready = dclient.identify().await;
 
-    let mut agent = DiscordAgent { guilds: vec![] };
+    let mut agent = DiscordAgent::new(&mut dclient);
+    agent.promised_guilds = ready.guilds.len();
+    agent.state = DiscordAgentState::from_file("data.json");
+    agent.main_loop().await;
 
-    match dclient.next_msg().await {
-        DiscordMessage::GuildCreate { d, .. } => {
-            agent.guilds.push(d);
-        }
-        m => println!("Unknown message: {:?}", m),
-    }
-
-    /*|| async {
-        for g in &agent.guilds {
-            for c in g.channels.as_ref().unwrap() {
-                if c.name.as_ref().unwrap() == "bot-playground" {
-                    for b in g.members.as_ref().unwrap() {
-                        let u = b.user.as_ref().unwrap();
-                        if u.bot.unwrap_or(false) {
-                            println!("Sending message to {}, {:?}", u.id, u.username);
-                            dclient
-                                .create_msg(&c.id, &format!("Hello fellow bot <@{}>", u.id))
-                                .await;
-                        }
-                    }
-                }
-            }
-        }
-    };*/
-
-    for g in agent.guilds {
-        for c in g.channels.as_ref().unwrap() {
-            if c.name.as_ref().unwrap() == "bot-playground" {
-                for x in &c.last_message_id {
-                    println!("Last Message: {:?}", dclient.get_channel_message(&c.id, x).await);
-                }
-            }
-        }
-    }
-
-    println!("Hello, world!\n{}", 1);
+    println!("Terminating successfully");
 }

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Emoji {
     pub id: Option<String>,
     pub name: Option<String>,
@@ -15,24 +15,30 @@ pub struct Reaction {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub enum Message {
+pub enum RateLimited<T> {
     RateLimit {
         global: bool,
         message: String,
         retry_after: u32,
     },
     Success {
-        id: String,
-        channel_id: String,
-        guild_id: Option<String>,
-        author: User,
-        member: Option<GuildMember>,
-        content: String,
-        timestamp: String,
-        edited_timestamp: Option<String>,
-        tts: bool,
-        reactions: Option<Vec<Reaction>>
+        #[serde(flatten)]
+        data: T,
     },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Message {
+    pub id: String,
+    pub channel_id: String,
+    pub guild_id: Option<String>,
+    pub author: User,
+    pub member: Option<GuildMember>,
+    pub content: String,
+    pub timestamp: String,
+    pub edited_timestamp: Option<String>,
+    pub tts: bool,
+    pub reactions: Option<Vec<Reaction>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +54,7 @@ pub enum CreateMessageResponse {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Channel {
     pub id: String,
     pub r#type: u32,
@@ -61,7 +67,9 @@ pub struct Channel {
 #[derive(Debug, Deserialize)]
 pub struct ReadyMessage {
     pub v: u32,
+    pub user: User,
     pub session_id: String,
+    pub guilds: Vec<UnavailableGuild>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +84,11 @@ pub struct HelloMessage {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UnavailableGuild {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Guild {
     pub id: String,
     pub name: String,
@@ -85,29 +98,87 @@ pub struct Guild {
     pub channels: Option<Vec<Channel>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct User {
     pub id: String,
-    pub username: String,
-    pub discriminator: String,
+    pub username: Option<String>,
+    pub discriminator: Option<String>,
     pub bot: Option<bool>,
     pub email: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct GuildMember {
     pub user: Option<User>,
     pub nick: Option<String>,
     pub roles: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct Activity {
+    pub name: String,
+    pub r#type: u32,
+    pub created_at: u64,
+    pub application_id: Option<String>,
+    pub details: Option<String>,
+    pub state: Option<String>,
+    pub emoji: Option<Emoji>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClientStatus {
+    pub web: Option<String>,
+    pub desktop: Option<String>,
+    pub mobile: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PresenceUpdate {
+    pub user: User,
+    pub game: Option<Activity>,
+    pub guild_id: String,
+    pub client_status: ClientStatus,
+    pub nick: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TypingStart {
+    pub user_id: String,
+    pub channel_id: String,
+    pub timestamp: u64,
+}
+
 #[derive(Debug)]
 pub enum DiscordMessage {
-    Ready { s: u32, d: ReadyMessage },
-    Resumed { s: u32, d: ResumedMessage },
-    GuildCreate { s: u32, d: Guild },
+    Ready {
+        s: u32,
+        d: ReadyMessage,
+    },
+    Resumed {
+        s: u32,
+        d: ResumedMessage,
+    },
+    GuildCreate {
+        s: u32,
+        d: Guild,
+    },
+    PresenceUpdate {
+        s: u32,
+        d: PresenceUpdate,
+    },
+    MessageCreate {
+        s: u32,
+        d: Message,
+    },
+    Unknown {
+        s: u32,
+        t: String,
+        d: serde_json::Value,
+    },
     InvalidSession {},
-    Hello { d: HelloMessage },
+    Hello {
+        d: HelloMessage,
+    },
 }
 
 impl<'de> serde::Deserialize<'de> for DiscordMessage {
@@ -173,11 +244,22 @@ impl<'de> serde::Deserialize<'de> for DiscordMessage {
                                             s: s.unwrap().unwrap(),
                                             d: map.next_value()?,
                                         })
+                                    } else if t == "PRESENCE_UPDATE" {
+                                        Ok(DiscordMessage::PresenceUpdate {
+                                            s: s.unwrap().unwrap(),
+                                            d: map.next_value()?,
+                                        })
+                                    } else if t == "MESSAGE_CREATE" {
+                                        Ok(DiscordMessage::MessageCreate {
+                                            s: s.unwrap().unwrap(),
+                                            d: map.next_value()?,
+                                        })
                                     } else {
-                                        Err(de::Error::unknown_variant(
-                                            &format!("{},{:?}", 0, t),
-                                            &[],
-                                        ))
+                                        Ok(DiscordMessage::Unknown {
+                                            t,
+                                            s: s.unwrap().unwrap(),
+                                            d: map.next_value()?,
+                                        })
                                     }
                                 }
                                 (9, _) => {
