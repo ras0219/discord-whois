@@ -80,7 +80,7 @@ pub struct ResumedMessage {
 
 #[derive(Debug, Deserialize)]
 pub struct HelloMessage {
-    pub heartbeat_interval: u32,
+    pub heartbeat_interval: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,34 +151,51 @@ pub struct TypingStart {
 #[derive(Debug)]
 pub enum DiscordMessage {
     Ready {
-        s: u32,
+        s: u64,
         d: ReadyMessage,
     },
     Resumed {
-        s: u32,
+        s: u64,
         d: ResumedMessage,
     },
     GuildCreate {
-        s: u32,
+        s: u64,
         d: Guild,
     },
     PresenceUpdate {
-        s: u32,
+        s: u64,
         d: PresenceUpdate,
     },
     MessageCreate {
-        s: u32,
+        s: u64,
         d: Message,
     },
     Unknown {
-        s: u32,
+        s: u64,
         t: String,
         d: serde_json::Value,
     },
     InvalidSession {},
+    HeartbeatAck {},
     Hello {
         d: HelloMessage,
     },
+}
+
+impl DiscordMessage {
+    pub fn seq(&self) -> Option<u64> {
+        match &self {
+            Self::Ready { s, .. } => Some(*s),
+            Self::Resumed { s, .. } => Some(*s),
+            Self::GuildCreate { s, .. } => Some(*s),
+            Self::PresenceUpdate { s, .. } => Some(*s),
+            Self::MessageCreate { s, .. } => Some(*s),
+            Self::Unknown { s, .. } => Some(*s),
+            Self::InvalidSession {} => None,
+            Self::HeartbeatAck {} => None,
+            Self::Hello { .. } => None,
+        }
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for DiscordMessage {
@@ -200,7 +217,7 @@ impl<'de> serde::Deserialize<'de> for DiscordMessage {
             {
                 let mut op = None;
                 let mut t: Option<Option<String>> = None;
-                let mut s: Option<Option<u32>> = None;
+                let mut s: Option<Option<u64>> = None;
                 while let Some(key) = map.next_key::<&'de str>()? {
                     match key {
                         "op" => {
@@ -269,6 +286,10 @@ impl<'de> serde::Deserialize<'de> for DiscordMessage {
                                 (10, _) => Ok(DiscordMessage::Hello {
                                     d: map.next_value()?,
                                 }),
+                                (11, _) => {
+                                    map.next_value::<de::IgnoredAny>()?;
+                                    Ok(DiscordMessage::HeartbeatAck {})
+                                }
                                 (op, t) => {
                                     Err(de::Error::unknown_variant(&format!("{},{:?}", op, t), &[]))
                                 }

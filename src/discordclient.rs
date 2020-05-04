@@ -5,6 +5,7 @@ use futures_util::sink::SinkExt;
 use httparse::Header;
 use serde_json::json;
 use std::collections::HashMap;
+use tokio::select;
 use tokio::stream::StreamExt;
 use tungstenite::Message;
 
@@ -17,6 +18,8 @@ pub struct DiscordClient {
     pub session_id: String,
     client: reqwest::Client,
     auth_header: String,
+    heartbeat_interval: Option<tokio::time::Interval>,
+    last_seq: u64,
 }
 
 impl DiscordClient {
@@ -48,6 +51,8 @@ impl DiscordClient {
             session_id: "".to_string(),
             client,
             auth_header,
+            heartbeat_interval: None,
+            last_seq: 0,
         };
         dclient
     }
@@ -107,25 +112,56 @@ impl DiscordClient {
             }
         }
     }
+
     pub async fn next_msg(&mut self) -> DiscordMessage {
         loop {
-            let msg = self.wss.next().await.unwrap().unwrap();
+            let msg = match &mut self.heartbeat_interval {
+                Some(i) => select!(
+                    v = self.wss.next() => v.unwrap().unwrap(),
+                    _ = i.next() => {
+                        let payload = json!({
+                            "op": 1,
+                            "d": self.last_seq
+                        })
+                        .to_string();
+                        println!("Heartbeating... {}", payload);
+                        self.wss.send(Message::text(payload)).await.unwrap();
+                        continue;
+                    },
+                ),
+                None => self.wss.next().await.unwrap().unwrap(),
+            };
             if !msg.is_text() {
                 continue;
             }
             let dismsg = serde_json::from_str::<DiscordMessage>(&msg.to_string());
             println!("DisMsg: {:?}", dismsg);
-            match &dismsg {
+            match dismsg {
                 Err(e) => {
                     println!("Msg: {}\n>>> {}", msg, &msg.to_string()[e.column()..]);
+                    panic!();
                 }
-                _ => {}
+                Ok(DiscordMessage::HeartbeatAck {}) => {
+                    continue;
+                }
+                Ok(msg) => {
+                    self.last_seq = msg.seq().unwrap_or(self.last_seq);
+                    return msg;
+                }
             }
-            return dismsg.unwrap();
         }
     }
     pub async fn get_hello(&mut self) {
-        self.next_msg().await;
+        let msg = self.next_msg().await;
+
+        match msg {
+            DiscordMessage::Hello { d } => {
+                self.heartbeat_interval = Some(tokio::time::interval(
+                    std::time::Duration::from_millis(d.heartbeat_interval),
+                ))
+            }
+            _ => panic!(),
+        }
     }
     pub async fn resume(&mut self, session_id: String) {
         let payload = json!({
