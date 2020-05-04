@@ -89,6 +89,10 @@ impl<'a> DiscordAgent<'a> {
                     self.dclient
                         .create_msg(&msg.channel_id, &format!("Karma: {}", value))
                         .await;
+                } else if msg.content.starts_with("%") {
+                    self.dclient
+                        .create_reaction(&msg.channel_id, &msg.id, "%e2%9d%94")
+                        .await;
                 }
             }
             _ => {}

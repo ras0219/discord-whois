@@ -175,6 +175,7 @@ pub enum DiscordMessage {
         t: String,
         d: serde_json::Value,
     },
+    Reconnect {},
     InvalidSession {},
     HeartbeatAck {},
     Hello {
@@ -191,6 +192,7 @@ impl DiscordMessage {
             Self::PresenceUpdate { s, .. } => Some(*s),
             Self::MessageCreate { s, .. } => Some(*s),
             Self::Unknown { s, .. } => Some(*s),
+            Self::Reconnect {} => None,
             Self::InvalidSession {} => None,
             Self::HeartbeatAck {} => None,
             Self::Hello { .. } => None,
@@ -278,6 +280,10 @@ impl<'de> serde::Deserialize<'de> for DiscordMessage {
                                             d: map.next_value()?,
                                         })
                                     }
+                                }
+                                (7, _) => {
+                                    map.next_value::<de::IgnoredAny>()?;
+                                    Ok(DiscordMessage::Reconnect {})
                                 }
                                 (9, _) => {
                                     map.next_value::<de::IgnoredAny>()?;
